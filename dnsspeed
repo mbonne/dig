@@ -1,0 +1,42 @@
+#!/bin/bash
+
+## Work in progress.
+
+# Get the domain from the argument
+domain=$1
+
+# Remove the protocol if it exists
+domain=${domain#*://}
+
+# Remove anything after the TLD
+domain=${domain%%/*}
+
+# Get the system's default DNS (only IPv4)
+default_dns=$(scutil --dns | grep 'nameserver\[0\]' | awk '{print $3}' | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" | head -n 1)
+
+# On non-mac nix based systems can use:
+#default_dns=$(nmcli dev show | grep 'IP4.DNS' | awk '{print $2}' | head -n1)
+
+
+# Check if we got a valid IPv4 address
+if [[ -z "$default_dns" ]]; then
+  echo "Could not find a valid IPv4 address for the default DNS."
+  exit 1
+fi
+
+# DNS providers
+dns_providers=( "$default_dns" "8.8.8.8" "1.1.1.1" "9.9.9.9" "208.67.222.222" )
+
+# DNS provider names
+dns_provider_names=( "Default DNS provider of $default_dns" "Google DNS 8.8.8.8" "Cloudflare 1.1.1.1" "Quad9 9.9.9.9" "OpenDNS 208.67.222.222" )
+
+echo "DNS Query Time for FQDN: $domain"
+echo ""
+
+# Iterate over each DNS provider and run dig command
+for index in ${!dns_providers[*]}
+do
+  echo "${dns_provider_names[$index]}"
+  dig @"${dns_providers[$index]}" "$domain" | grep "Query time:"
+  echo ""
+done

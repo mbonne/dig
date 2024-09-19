@@ -1,0 +1,71 @@
+#!/bin/bash
+
+## Work in progress.
+
+NONE='\033[00m'
+RED='\033[01;31m'
+GREEN='\033[01;32m'
+
+function whodis() {
+  # Get the domain from the argument
+  domain=$1
+
+  # Remove the protocol if it exists
+  domain=${domain#*://}
+
+  # Remove anything after the TLD
+  domain=${domain%%/*}
+
+  dnsLookup="$(nslookup "$domain")"
+  if ! grep -q "NXDOMAIN" <<<"$dnsLookup" >/dev/null; then
+
+    echo -e "${GREEN}\n>>> Domain Whois: ${NONE}"
+    whoisLookup="$(whois "$domain")"
+    # Print the whole whois
+    echo -e "$whoisLookup\n"
+
+    # Extract information
+    registrant=$(echo "$whoisLookup" | grep -iE "Registrant:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    registrantContact=$(echo "$whoisLookup" | grep -iE "Registrant Name:|Registrant Contact Name:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    registrantEmail=$(echo "$whoisLookup" | grep -iE "Registrant Email:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    techContact=$(echo "$whoisLookup" | grep -iE "Tech Contact Name:|Tech Name:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    techEmail=$(echo "$whoisLookup" | grep -iE "Tech Email:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    registrar=$(echo "$whoisLookup" | grep -iE "Registrar:|Registrar Name:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    registrationDate=$(echo "$whoisLookup" | grep -i "Creation Date:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    expirationDate=$(echo "$whoisLookup" | grep -i "Registry Expiry Date:" | head -n 1 | awk -F: '{print $2}' | sed 's/^ *//')
+    nameServers=$(echo "$whoisLookup" | grep -i "Name Server:" | awk -F: '{print $2}' | sed 's/^ *//' | sort | uniq)
+
+    # Print the extracted information using a loop
+    domainInfo=("Domain: $domain" "Registrant: $registrant" "Registrant Contact: $registrantContact" "Registrant Email: $registrantEmail" "Tech Contact: $techContact" "Tech Email: $techEmail" "Registrar: $registrar" "Registration Date: $registrationDate" "Expiration Date: $expirationDate" "Name Servers:\n$nameServers")
+
+    for item in "${domainInfo[@]}"; do
+      echo -e "> $item"
+    done
+
+    # Check for each domain lock status
+    check_lock() {
+      local lock_type=$1
+      if echo "$whoisLookup" | grep -qi "$lock_type"; then
+        echo -e "${GREEN}Enabled:  $lock_type${NONE}"
+      else
+        echo -e "${RED}Disabled: $lock_type${NONE}"
+      fi
+    }
+
+    # Check and print each lock status
+    echo -e "\n${GREEN}Domain Lock State:${NONE}"
+    check_lock "clientTransferProhibited"
+    check_lock "clientUpdateProhibited"
+    check_lock "clientDeleteProhibited"
+
+
+    echo -e "${GREEN}\n>>> End Domain Checks"
+
+  else
+    echo -e "${RED}\n>>> Error with domain"
+    echo -e "\n$dnsLookup\n${NONE}"
+    exit 1
+  fi
+}
+
+whodis "$1"

@@ -1,0 +1,349 @@
+#!/bin/bash
+
+NONE='\033[00m'
+RED='\033[01;31m'
+YELLOW='\033[01;33m'
+GREEN='\033[01;32m'
+
+# https://datatracker.ietf.org/doc/html/rfc3833 Threat Analysis of the Domain Name System (DNS)
+
+function digd() {
+  # Get the domain from the argument
+  domain=$1
+
+  # Remove the protocol if it exists
+  domain=${domain#*://}
+
+  # Remove anything after the TLD
+  domain=${domain%%/*}
+
+
+  # Build base variables
+  dnsLookup="$(nslookup "$domain")"
+  whoisLookup="$(whois "$domain")"
+
+  # For list of recommended DNS changes for security
+  recommendations=""
+
+  ####################################################################
+  ## Online Checking Sites
+  ####################################################################
+
+  #if ! grep -q "NXDOMAIN" <<<"$dnsLookup" >/dev/null; then
+
+  if grep -q "NXDOMAIN" <<<"$dnsLookup" && grep -q "No match for domain" <<<"$whoisLookup"; then
+    ####################################################################
+    ## error if domain doesn't check out / has spelling mistake etc
+    ####################################################################
+    echo -e "${RED}\n>>> Error with domain"
+    echo -e "Domain $domain is not valid or not registered."
+    echo -e "\n$dnsLookup\n${NONE}" 
+    exit 1
+  else
+
+    ####################################################################
+    ## Open Source Intelligence about domain
+    ####################################################################
+    echo -e "${GREEN}\n>>> Online Checkers: ${NONE}"
+    echo -e "> OSINT:.........https://osint.sh https://dnsdumpster.com/ https://dnschecker.org/"
+    echo -e "> SPF:...........https://easydmarc.com/tools/spf-lookup?domain=$domain"
+    echo -e "> DKIM:..........https://easydmarc.com/tools/dkim-lookup?domain=$domain"
+    echo -e "> DMARC:.........https://easydmarc.com/tools/dmarc-lookup?domain=$domain"
+    echo -e "> DNSSEC:........https://dnsviz.net/d/$domain/dnssec/"
+    echo -e "> Blocklist:.....https://mxtoolbox.com/supertool3?action=blacklist%3a$domain&run=toolpage"
+    echo -e "> DNS Lookup:....https://dnschecker.org/all-dns-records-of-domain.php?query=$domain&rtype=ALL&dns=google"
+    echo -e "> DNS History:...https://securitytrails.com/domain/$domain/dns"
+    echo -e "> Cert History:..https://crt.sh/?q=$domain"
+    echo -e "> SSL Report:....https://www.ssllabs.com/ssltest/analyze.html?d=$domain&hideResults=on&latest"
+    echo -e "> Talos Intel:...https://talosintelligence.com/reputation_center/lookup?search=$domain"
+    echo -e "> Whois History:.https://www.bigdomaindata.com/whois-history/$domain\n"
+
+    ####################################################################
+    ## whois Checks
+    ####################################################################
+    echo -e "${GREEN}\n>>> Domain Whois: ${NONE}"
+
+    if echo "$whoisLookup" | grep -q "Malformed request."; then
+    echo -e "${YELLOW}INFO: whois lookup returned Malformed request. This usually happens when checking a subdomain.${NONE}"
+    recommendations+="INFO: If you were checking a subdomain, Re-run script against the root domain for more details.\n"
+    else
+      echo -e "$whoisLookup\n"
+
+      # TODO: alert if domain is or close to expired. "Registrar Registration Expiration Date:" was only able to get this with python-dateutil installed.
+      # Extract information from whoisLookup
+      registrant=$(echo "$whoisLookup" | grep -iE "Registrant:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      registrantContact=$(echo "$whoisLookup" | grep -iE "Registrant Name:|Registrant Contact Name:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      registrantEmail=$(echo "$whoisLookup" | grep -iE "Registrant Email:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      techContact=$(echo "$whoisLookup" | grep -iE "Tech Contact Name:|Tech Name:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      techEmail=$(echo "$whoisLookup" | grep -iE "Tech Email:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      registrar=$(echo "$whoisLookup" | grep -iE "Registrar:|Registrar Name:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      registrationDate=$(echo "$whoisLookup" | grep -i "Creation Date:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      expirationDate=$(echo "$whoisLookup" | grep -iE "Registrar Registration Expiration Date:" | head -n 1 | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+      nameServers=$(echo "$whoisLookup" | grep -i "Name Server:" | cut -d':' -f2- | sed 's/^ *//;s/ *$//' | sort | uniq)
+      domainRenewalState=$(echo "$whoisLookup" | grep -i "Status Reason:" | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+
+      echo -e "\n${GREEN}whois brief:${NONE}"
+
+      # Print the extracted information using a loop
+      domainInfo=("Domain: $domain" "Registrant: $registrant" "Registrant Contact: $registrantContact" "Registrant Email: $registrantEmail" "Tech Contact: $techContact" "Tech Email: $techEmail" "Registrar: $registrar" "Registration Date: $registrationDate" "Registration Expiry: $expirationDate" "Name Servers:\n$nameServers")
+
+      for item in "${domainInfo[@]}"; do
+        # Extract the variable part from the item
+        value=$(echo "$item" | cut -d':' -f2- | sed 's/^ *//;s/ *$//')
+        if [[ -n "$value" ]]; then
+          echo -e "> $item"
+        fi
+      done
+
+      # Check for each domain lock status
+      check_lock() {
+        local lock_type=$1
+        if echo "$whoisLookup" | grep -qi "$lock_type"; then
+          echo -e "${GREEN}Enabled:  $lock_type${NONE}"
+        else
+          echo -e "${YELLOW}Disabled: $lock_type${NONE}"
+          recommendations+="${YELLOW}Check with Domain Registrar if you can enable: $lock_type${NONE}\n"
+        fi
+      }
+
+      # Check and print each lock status
+      echo -e "\n${GREEN}Domain Lock State:${NONE}"
+      check_lock "clientTransferProhibited"
+      check_lock "clientUpdateProhibited"
+      check_lock "clientDeleteProhibited"
+      echo -e "$domainRenewalState"
+
+    fi
+
+    ####################################################################
+    ## dig Checks
+    ####################################################################
+    echo -e "${GREEN}\n>>> NS${NONE}"
+    ns_servers=$(dig NS +short "$domain")
+    if [ -z "$ns_servers" ]; then
+      echo "${RED}No name servers found for domain $domain${NONE}"
+    else
+      echo -e "$ns_servers"
+    fi
+
+    dnsSec=$(echo -e "$whoisLookup" | grep "DNSSEC" | head -n 2 | sed 's/^[[:space:]]*//')
+    if echo "$whoisLookup" | grep -q "DNSSEC: signedDelegation"; then
+      echo -e "${GREEN}\nDNSSEC:${NONE}\n$dnsSec"
+    else
+      echo -e "${GREEN}\nDNSSEC:${NONE}\n$dnsSec"
+      recommendations+="${YELLOW}Consider enabling DNSSEC to improve DNS Security. RFC 9364${NONE}\n"
+    fi
+
+    ####################################################################
+    echo -e "${GREEN}\n>>> SOA${NONE}"
+    dig SOA +short "$domain"
+
+    ####################################################################
+    echo -e "${GREEN}\n>>> A${NONE}"
+    dig A +short "$domain"
+
+    ####################################################################
+    echo -e "${GREEN}\n>>> MX${NONE}"
+    mxRecord=$(dig MX +short "$domain" | sort)
+    emailISP=""
+    if [[ -n "$mxRecord" ]]; then
+      echo -e "$mxRecord"
+      if echo "$mxRecord" | grep -qi "outlook"; then
+        emailISP="Microsoft"
+      elif echo "$mxRecord" | grep -qiE "google|gmail"; then
+        emailISP="Google"
+      else
+        emailISP="Other"
+        recommendations+="MX records point to SP other than Microsoft/Google. Ensure DKIM and SPF are correct to send from the provider.\n"
+      fi
+    fi
+
+    ####################################################################
+
+    echo -e "${GREEN}\n>>> TXT${NONE}"
+
+    ## TXT Records
+    allTxt=$(dig TXT +short "$domain")
+    spfFound=false
+
+    if [[ -n "${allTxt}" ]]; then
+      # Print all TXT records except for the SPF record
+      echo -e "$allTxt" | grep -v "v=spf" | sed 's/"//g'
+      
+      # Check for SPF record
+      spfRecords=$(echo "$allTxt" | grep "v=spf" | sed 's/"//g')
+      spfCount=$(echo "$spfRecords" | grep -c "v=spf" | xargs)  # Count only SPF records and trim whitespace
+      
+      if (( spfCount == 1 )); then
+        spfFound=true
+        spfRecord="$spfRecords"
+        
+        # Check SPF version
+        if [[ ! "$spfRecord" =~ ^v=spf1 ]]; then
+          recommendations+="${RED}SPF record found is wrong version. should always begin with v=spf1 - RFC 7208${NONE}\n"
+        fi
+        
+        # Check if SPF record ends with 'all' and appears only once
+        allCount=$(echo "$spfRecord" | grep -o "all" | wc -l | xargs)
+        if (( allCount != 1 )); then
+          recommendations+="${RED}SPF record should contain the 'all' directive exactly once and at the end. - RFC 7208${NONE}\n"
+        elif [[ ! "$spfRecord" =~ all$ ]]; then
+          recommendations+="${RED}SPF record should end with 'all'.${NONE}\n"
+        fi
+        
+        # Check if 'all' is used without ~all or -all
+        if [[ "$spfRecord" =~ ^v=spf1.*\ all$ && ! "$spfRecord" =~ [\?~+-]all$ ]]; then
+          recommendations+="${RED}SPF record should not use 'all' on its own. Use '~all' or '-all' instead. - RFC 7208${NONE}\n"
+        fi
+        
+        if [[ "$spfRecord" =~ \+all$ ]]; then
+          recommendations+="${RED}Urgent: Change '+all' to a more restrictive directive. '+all' allows any sending server. - RFC 7208${NONE}\n"
+        elif [[ "$spfRecord" =~ \?all$ ]]; then
+          recommendations+="${YELLOW}SPF security can be improved by using '~all' at the end. - RFC 7208${NONE}\n"
+        elif [[ "$spfRecord" =~ ~all$ ]]; then
+          recommendations+="${YELLOW}SPF security can be improved by using '-all' at the end. - RFC 7208${NONE}\n"
+        fi
+        
+        # Check for uppercase characters
+        if [[ "$spfRecord" =~ [A-Z] ]]; then
+          recommendations+="SPF record should not contain uppercase characters.\n"
+        fi
+        
+        # Check the number of included hosts
+        includedHosts=$(echo "$spfRecord" | grep -oE "include:[^ ]*|a:[^ ]*" | wc -l | xargs)  # Trim any leading/trailing whitespace
+        if (( includedHosts > 10 )); then
+          recommendations+="${RED}SPF record is over the 10 included hostname limit. This needs to be fixed. - RFC 7208\nhttps://easydmarc.com/tools/spf-lookup?domain=$domain${NONE}\n"
+        elif (( includedHosts >= 7 )); then
+          recommendations+="${YELLOW}SPF record has 7 or more included hostnames. You should check for nested lookups which might take it over the 10 limit. - RFC 7208\nhttps://easydmarc.com/tools/spf-lookup?domain=$domain${NONE}\n"
+        fi
+
+        # Print SPF record
+        echo -e "\n${GREEN}SPF:${NONE}\n$spfRecord"
+      elif (( spfCount >= 2 )); then
+        spfFound=true
+        recommendations+="${RED}Found $spfCount SPF records. There can be only one... This needs to be fixed. - RFC 7208\nhttps://easydmarc.com/tools/spf-lookup?domain=$domain${NONE}\n"
+        echo -e "\n${GREEN}SPF:${NONE}\n$spfRecords"
+      fi
+    fi
+
+    # If no SPF record was found, add the recommendation
+    if [[ "$spfFound" = false ]]; then
+      recommendations+="${RED}No SPF record found. It is recommended to add an SPF record to improve email security. - RFC 7208${NONE}\n"
+    fi
+
+    ## Typical MTA-STS
+    mtasts=$(dig TXT +short "_mta-sts.$domain")
+    if echo "$mtasts" | grep -qi "sts"; then
+      echo -e "${GREEN}\nMTA-STS:${NONE}\n$mtasts\n" | sed 's/"//g'
+    else
+      recommendations+="No MTA-STS found. Ensures email is sent over TLS connections, protecting against MiTM attacks. - RFC 8461 _mta-sts.$domain\n"
+    fi
+
+    ## Typical BIMI
+    bimi=$(dig TXT +short "default._bimi.$domain")
+    if echo "$bimi" | grep -qi "bimi"; then
+      echo -e "${GREEN}\nBIMI:${NONE}\n$bimi\n" | sed 's/"//g'
+    else
+      recommendations+="No BIMI record found. This is used to provide company logo in inbox. default._bimi.$domain\n"
+    fi
+
+    ## Typical google DKIM
+    googleDkim=$(dig TXT +short "google._domainkey.$domain")
+    if echo "$googleDkim" | grep -qi "v=DKIM"; then
+      echo -e "${GREEN}\nGoogle DKIM:${NONE}\n$googleDkim\n" | sed 's/"//g'
+    else
+      if echo "$emailISP" | grep -qiE "google|gmail"; then
+        recommendations+="${RED}MX points to Google, But no DKIM TXT found. Needs investigation. - RFC 6376${NONE}\n"
+      fi
+    fi
+
+    ## Typical DMARC
+    hasDmarc=$(dig TXT +short "_dmarc.$domain")
+    hasDmarc=${hasDmarc//\"/}
+
+    if echo "$hasDmarc" | grep -qi "v=DMARC"; then
+      echo -e "${GREEN}\nDMARC:${NONE}\n$hasDmarc"
+      # Check for DMARC policy level
+      if echo "$hasDmarc" | grep -qi "p=none"; then
+        recommendations+="${YELLOW}DMARC policy is set to 'none'. It is recommended to increase the policy level to 'quarantine' and then 'reject'.${NONE}\n"
+      elif echo "$hasDmarc" | grep -qi "p=quarantine"; then
+        recommendations+="${YELLOW}DMARC policy is set to 'quarantine'. Consider increasing the policy level to 'reject' for stronger enforcement.${NONE}\n"
+      fi
+    else
+      recommendations+="${RED}No DMARC found. Strongly recommended to implement after SPF and DKIM are correct.${NONE}\n"
+    fi
+
+    ####################################################################
+    echo -e "${GREEN}\n>>> CNAME${NONE}"
+    dig CNAME +short "$domain"
+    ## Typical O365 DKIM
+
+    o365Dkim1=$(dig CNAME +short "selector1._domainkey.$domain")
+    if [[ -n "${o365Dkim1}" ]]; then
+      echo -e "${GREEN}\nOffice365 DKIM:${NONE}\n$o365Dkim1"
+    else
+      if echo "$emailISP" | grep -qi "outlook"; then
+        recommendations+="${RED}MX points to Microsoft, But no DKIM selector1 CNAME found. Needs investigation. - RFC 6376${NONE}\n"
+      fi
+    fi
+
+    o365Dkim2=$(dig CNAME +short "selector2._domainkey.$domain")
+    if [[ -n "${o365Dkim2}" ]]; then
+      echo -e "${GREEN}Office365 DKIM:${NONE}\n$o365Dkim2"
+    else
+      if echo "$emailISP" | grep -qi "outlook"; then
+        recommendations+="${RED}MX points to Microsoft, But no DKIM selector2 CNAME found. Needs investigation. - RFC 6376${NONE}\n"
+      fi
+    fi
+
+    ####################################################################
+    echo -e "${GREEN}\n>>> Zone Transfer Check${NONE}"
+
+    # Function to check DNS zone transfer
+    # To see what a zone transfer looks like use: dig axfr @nsztm1.digi.ninja zonetransfer.me
+    # A 3rd party should not be allowed to freely obtain all DNS records by running an unauthorised zone transfer.
+    function check_zone_transfer() {
+      for ns in $ns_servers; do
+        echo "Checking $ns for zone transfer..."
+        result=$(perl -e 'alarm shift; exec @ARGV' 5 dig axfr "$domain" @"$ns" 2>&1)
+
+        if [ $? -eq 142 ]; then
+          echo "Zone transfer attempt timeout."
+        elif echo "$result" | grep -q "Transfer failed"; then
+          echo "Zone transfer failed on $ns - This is good"
+        else
+          echo -e "${RED}Zone transfer successful on $ns - Needs investigation.${NONE}"
+          echo "$result"
+          recommendations+="${RED}DNS Server $ns Allows Zone Transfer. This should be blocked. - RFC 5936${NONE}\n"
+        fi
+      done
+    }
+
+    # Run the zone transfer check
+    check_zone_transfer "$1"
+
+
+
+    echo -e "${GREEN}\n>>> End Domain Checks\n"
+
+    ####################################################################
+    ## Some Basic recommendations
+    ####################################################################
+    # Print Recommendations
+    if [ -z "$recommendations" ]; then
+      exit 0
+    else
+      echo -e "${GREEN}\n>>> Domain Reccomendations for: $domain${NONE}"
+      echo -e "The following are not in any particular order.\n"
+      echo -e "$recommendations"
+    fi
+
+  fi
+
+}
+
+
+# Runs the function
+digd "$1"
+
+exit $?

@@ -1,0 +1,141 @@
+#!/bin/bash
+
+## Work in progress.
+
+NONE='\033[00m'
+RED='\033[01;31m'
+YELLOW='\033[01;33m'
+GREEN='\033[01;32m'
+
+
+function digd() {
+  # Get the domain from the argument
+  domain=$1
+
+  # Remove the protocol if it exists
+  domain=${domain#*://}
+
+  # Remove anything after the TLD
+  domain=${domain%%/*}
+
+
+  # Build base variables
+  dnsLookup="$(nslookup "$domain")"
+
+  # For list of recommended DNS changes for security
+  recommendations=""
+
+  ####################################################################
+  ## Online Checking Sites
+  ####################################################################
+
+  #if ! grep -q "NXDOMAIN" <<<"$dnsLookup" >/dev/null; then
+
+  if grep -q "NXDOMAIN" <<<"$dnsLookup"; then
+    ####################################################################
+    ## error if domain doesn't check out / has spelling mistake etc
+    ####################################################################
+    echo -e "${RED}\n>>> Error with domain"
+    echo -e "Domain $domain is not valid or not registered."
+    echo -e "\n$dnsLookup\n${NONE}" 
+    exit 1
+  else
+
+    ####################################################################
+    ## dig Checks
+    ####################################################################
+
+    echo -e "${GREEN}\n>>> TXT${NONE}"
+
+    ## TXT Records
+    allTxt=$(dig TXT +short "$domain")
+    spfFound=false
+    recommendations=""
+
+    if [[ -n "${allTxt}" ]]; then
+      # Print all TXT records except for the SPF record
+      echo -e "$allTxt" | grep -v "v=spf" | sed 's/"//g'
+      
+      # Check for SPF record
+      spfRecords=$(echo "$allTxt" | grep "v=spf" | sed 's/"//g')
+      spfCount=$(echo "$spfRecords" | grep -c "v=spf" | xargs)  # Count only SPF records and trim whitespace
+      
+      if (( spfCount == 1 )); then
+        spfFound=true
+        spfRecord="$spfRecords"
+        
+        # Check SPF version
+        if [[ ! "$spfRecord" =~ ^v=spf1 ]]; then
+          recommendations+="${RED}SPF record found is wrong version. should always begin with v=spf1${NONE}\n"
+        fi
+        
+        # Check if SPF record ends with 'all' and appears only once
+        allCount=$(echo "$spfRecord" | grep -o "all" | wc -l | xargs)
+        if (( allCount != 1 )); then
+          recommendations+="${RED}SPF record should contain the 'all' directive exactly once and at the end.${NONE}\n"
+        elif [[ ! "$spfRecord" =~ all$ ]]; then
+          recommendations+="${RED}SPF record should end with 'all'.${NONE}\n"
+        fi
+        
+        # Check if 'all' is used without ~all or -all
+        if [[ "$spfRecord" =~ ^v=spf1.*\ all$ && ! "$spfRecord" =~ [\?~+-]all$ ]]; then
+          recommendations+="${RED}SPF record should not use 'all' on its own. Use '~all' or '-all' instead.${NONE}\n"
+        fi
+        
+        if [[ "$spfRecord" =~ \+all$ ]]; then
+          recommendations+="${RED}Urgent: Change '+all' to a more restrictive directive. '+all' allows any sending server.${NONE}\n"
+        elif [[ "$spfRecord" =~ \?all$ ]]; then
+          recommendations+="${YELLOW}SPF security can be improved by using '~all' at the end.${NONE}\n"
+        elif [[ "$spfRecord" =~ ~all$ ]]; then
+          recommendations+="${YELLOW}SPF security can be improved by using '-all' at the end.${NONE}\n"
+        fi
+        
+        # Check for uppercase characters
+        if [[ "$spfRecord" =~ [A-Z] ]]; then
+          recommendations+="SPF record should not contain uppercase characters.\n"
+        fi
+        
+        # Check the number of included hosts
+        includedHosts=$(echo "$spfRecord" | grep -oE "include:[^ ]*|a:[^ ]*" | wc -l | xargs)  # Trim any leading/trailing whitespace
+        if (( includedHosts > 10 )); then
+          recommendations+="${RED}SPF record is over the 10 included hostname limit. This needs to be fixed.\nhttps://easydmarc.com/tools/spf-lookup?domain=$domain${NONE}\n"
+        elif (( includedHosts >= 7 )); then
+          recommendations+="${YELLOW}SPF record has 7 or more included hostnames. You should check for nested lookups which might take it over the 10 limit.\nhttps://easydmarc.com/tools/spf-lookup?domain=$domain${NONE}\n"
+        fi
+
+        # Print SPF record
+        echo -e "\n${GREEN}SPF:${NONE}\n$spfRecord"
+      elif (( spfCount >= 2 )); then
+        spfFound=true
+        recommendations+="${RED}Found $spfCount SPF records. There can be only one... This needs to be fixed.\nhttps://easydmarc.com/tools/spf-lookup?domain=$domain${NONE}\n"
+        echo -e "\n${GREEN}SPF:${NONE}\n$spfRecords"
+      fi
+    fi
+
+    # If no SPF record was found, add the recommendation
+    if [[ "$spfFound" = false ]]; then
+      recommendations+="${RED}No SPF record found. It is recommended to add an SPF record to improve email security.${NONE}\n"
+    fi
+
+
+    ####################################################################
+    ## Some Basic recommendations
+    ####################################################################
+    # Print Recommendations
+    if [ -z "$recommendations" ]; then
+      exit 0
+    else
+      echo -e "${GREEN}\n>>> Domain Reccomendations for: $domain${NONE}"
+      echo -e "The following are not in any particular order.\n"
+      echo -e "$recommendations"
+    fi
+
+  fi
+
+}
+
+
+# Runs the function
+digd "$1"
+
+exit $?
